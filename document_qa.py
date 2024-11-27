@@ -3,38 +3,29 @@ import argparse
 import re
 import json
 from typing import List, Dict, Any
-from langchain.chains.summarize import load_summarize_chain
+import diskcache
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
-from langchain.chains.question_answering import load_qa_chain
-from langchain.llms import OpenAI
-from langchain_openai import ChatOpenAI, OpenAI
-from langchain.chains import RetrievalQA
 import chromadb
 from sentence_transformers import SentenceTransformer
 from langchain.text_splitter import CharacterTextSplitter, RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 from langchain_community.llms import HuggingFacePipeline
-from langchain.chains import RetrievalQA
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
-from langchain_community.llms import HuggingFacePipeline
 
 class DocumentQAAgent:
-    def __init__(self, base_url: str, output_dir: str = 'output'):
-        """
-        Initialize the QA Agent with a base URL for documentation
-        
-        Args:
-            base_url (str): Base URL of the help documentation
-            output_dir (str): Directory to store processed documents and embeddings
-        """
+    def __init__(self, base_url: str, output_dir: str = 'output', cache_dir: str = 'cache'):
         self.base_url = base_url
         self.output_dir = output_dir
+        self.cache_dir = cache_dir
         
-        # Ensure output directory exists
+        # Ensure output and cache directories exist
         os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(cache_dir, exist_ok=True)
+
+        # Initialize persistent cache
+        self.cache = diskcache.Cache(self.cache_dir)
         
         # Paths for storing intermediate files
         self.scraped_urls_path = os.path.join(output_dir, 'scraped_urls.json')
@@ -44,30 +35,32 @@ class DocumentQAAgent:
         self.embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
         self.chroma_client = chromadb.PersistentClient(path=os.path.join(output_dir, 'chromadb'))
         self.collection = None
-        
+
+    def _cache_get(self, key: str) -> Any:
+        if key in self.cache:
+            return self.cache[key]
+        return None
+    
+    def _cache_set(self, key: str, value: Any) -> None:
+        self.cache[key] = value
+
     def validate_url(self) -> bool:
-        """
-        Validate the input URL
-        
-        Returns:
-            bool: Whether the URL is valid and accessible
-        """
         try:
             response = requests.head(self.base_url, timeout=5, allow_redirects=True)
             return response.status_code == 200
         except requests.RequestException:
             print(f"Error: Cannot access URL {self.base_url}")
             return False
-    
+
     def extract_links(self, max_depth: int = 2, max_urls: int = 50) -> List[str]:
-        """
-        Extract valid documentation links from the base URL
-        
-        Returns:
-            List[str]: List of unique URLs to scrape
-        """
+        cached_links = self._cache_get('scraped_links')
+        if cached_links:
+            print("Using cached links.")
+            return cached_links
+
+        # Define helper functions
         def is_valid_help_url(url: str) -> bool:
-            """Internal helper to validate documentation URLs"""
+          
             parsed = urlparse(url)
             return (
                 parsed.netloc == urlparse(self.base_url).netloc and
@@ -115,19 +108,15 @@ class DocumentQAAgent:
                         to_scrape.append((link, depth + 1))
 
         print(f"Found {len(unique_urls)} unique URLs to scrape")
+        self._cache_set('scraped_links', list(unique_urls))
         return list(unique_urls)[:max_urls]
-
-
+        
     def load_documents(self, urls: List[str]) -> List[Dict]:
-        """
-        Load and process documents from given URLs
+        cached_documents = self._cache_get('processed_documents')
+        if cached_documents:
+            print("Using cached documents.")
+            return cached_documents
 
-        Args:
-            urls (List[str]): List of URLs to scrape
-
-        Returns:
-            List[Dict]: Processed documents
-        """
         documents = []
         scraped_urls = set()
 
@@ -188,30 +177,39 @@ class DocumentQAAgent:
                         'source': url,
                         'title': soup.title.string if soup.title else 'No Title',
                         **metadata  # Merge extracted metadata
-                    },
+                    }
                 }
+                
+                # Now cache the document text and compute embeddings
+                embeddings_key = f"embeddings_{url}"
+                embeddings = self._cache_get(embeddings_key)
+
+                if embeddings is None:
+                    # Compute embeddings if not cached
+                    embeddings = self.embedding_model.encode([text])[0]
+                    self._cache_set(embeddings_key, embeddings)
+
+                document['embeddings'] = embeddings
 
                 documents.append(document)
+
+                # Cache the processed document
+                self._cache_set(url, document)
                 scraped_urls.add(url)
-                print(f"Scraped: {url}")
+
+                if len(documents) > 10:
+                    break
 
             except Exception as e:
                 print(f"Error scraping {url}: {e}")
 
-        # Save scraped URLs
-        with open(self.scraped_urls_path, 'w') as f:
-            json.dump(list(scraped_urls), f)
+        # Cache the list of documents
+        self._cache_set('processed_documents', documents)
 
         return documents
 
 
     def create_embeddings(self, documents: List[Dict]):
-        """
-        Create embeddings for documents and store in ChromaDB
-        
-        Args:
-            documents (List[Dict]): List of processed documents
-        """
         # Split documents into chunks
         text_splitter = CharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
         langchain_docs = [Document(page_content=doc['page_content'], metadata=doc['metadata']) for doc in documents]
@@ -243,14 +241,13 @@ class DocumentQAAgent:
         
         print(f"Created embeddings for {len(chunks)} chunks")
     
-
     def summarize_documents(self, documents: List[Document], question: str) -> str:
 
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
         chunks = text_splitter.split_documents(documents)
 
         # Load Mistral model
-        model_name = "mistralai/Mistral-7B-Instruct-v0.3"
+        model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
 
@@ -312,7 +309,7 @@ class DocumentQAAgent:
             context = self.summarize_documents(documents, question)
         
         # Load Mistral model
-        model_name = "mistralai/Mistral-7B-Instruct-v0.2"
+        model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
 
@@ -325,7 +322,7 @@ class DocumentQAAgent:
         )
 
         # Convert to LangChain LLM
-        llm = HuggingFacePipeline(pipeline=qa_pipeline)
+        llm = HuggingFacePipeline(pipeline=qa_pipeline,pad_token_id=qa_pipeline.tokenizer.eos_token_id)
 
         # Create prompt with context and question
         prompt = f"""Using only the following context, answer the question precisely and accurately.  behave like an knowledgable question and answering agent, give short, brief and infrmative response.:
@@ -346,9 +343,6 @@ class DocumentQAAgent:
         }
 
     def process_documentation(self):
-        """
-        Full pipeline to process documentation
-        """
         if not self.validate_url():
             print("Invalid or unreachable URL")
             return False

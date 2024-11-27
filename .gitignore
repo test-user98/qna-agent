@@ -1,0 +1,29 @@
+# Python bytecode files
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment directories
+venv/
+env/
+.venv/
+
+output/
+db/
+# IDE settings (for common IDEs like VSCode, PyCharm, etc.)
+.vscode/
+.idea/
+
+# MacOS system files
+.DS_Store
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Logs and database files
+*.log
+*.sqlite3
+
+# Sensitive information (API keys, passwords, etc.)
+*.env
+*.apikey

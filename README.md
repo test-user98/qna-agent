@@ -1,6 +1,4 @@
-Here's an example of a **README.md** file for your agent-based project, which includes the features, a mapping diagram for response generation, and a flow of code explanation.
 
----
 
 # Agent-Based System for Response Generation
 

@@ -12,14 +12,15 @@ We are using below models:
 - using chroma vector db to store embeddings
 - Also using cache to store the scraped urls, recorsively scrapping them.
 - added functionality to exclude auth, login and filter and process the html doc to geenrate a json of document in belo format:
-
-{
-  page_content: <content>
-  metadata: {
-    source: <data>
-    title: <tile>
+```
+ {
+    "page_content": "<content>"
+    "metadata": {
+      "source": "<URL>",
+      "title": "<tile>"
     }
-}
+ }
+```
 
 - we are creating chunks from the raw documents,
 - defult recursive scraping is with depth: 3
